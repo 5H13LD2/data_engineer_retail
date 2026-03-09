@@ -1,0 +1,111 @@
+"""
+Retail Data Ingestion DAG
+=========================
+Ang DAG na ito ang nag-o-orchestrate ng data ingestion pipeline:
+1. Generate 1M retail transactions (data_generator.py)
+2. Fetch weather data for all store locations (weather_api_fetcher.py)
+3. Upload both datasets to Amazon S3 (Bronze layer)
+
+Schedule: Daily at 6:00 AM
+"""
+
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
+
+# ============================================================
+# Default Arguments
+# ============================================================
+default_args = {
+    "owner": "data_engineering",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+}
+
+# ============================================================
+# DAG Definition
+# ============================================================
+with DAG(
+    dag_id="retail_data_ingestion",
+    default_args=default_args,
+    description="Ingestion pipeline: Generate retail data + fetch weather → upload to S3",
+    schedule_interval="0 6 * * *",  # Araw-araw, 6:00 AM
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=["retail", "ingestion", "bronze"],
+) as dag:
+
+    # ----------------------------------------------------------
+    # Task 1: Generate Retail Transaction Data (1M rows)
+    # ----------------------------------------------------------
+    generate_transactions = BashOperator(
+        task_id="generate_retail_transactions",
+        bash_command=(
+            "cd /opt/airflow/dags/../data_gen && "
+            "python data_generator.py"
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Task 2: Fetch Weather Data from OpenWeatherMap API
+    # ----------------------------------------------------------
+    fetch_weather = BashOperator(
+        task_id="fetch_weather_data",
+        bash_command=(
+            "cd /opt/airflow/dags/../data_gen && "
+            "python weather_api_fetcher.py"
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Task 3: Upload Retail Data to S3 (Bronze Layer)
+    # ----------------------------------------------------------
+    upload_transactions_to_s3 = BashOperator(
+        task_id="upload_transactions_to_s3",
+        bash_command=(
+            "aws s3 cp /opt/airflow/data_gen/output/retail_transactions.csv "
+            "s3://retail-data-pipeline-bronze/transactions/"
+            "retail_transactions_{{ ds_nodash }}.csv"
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Task 4: Upload Weather Data to S3 (Bronze Layer)
+    # ----------------------------------------------------------
+    upload_weather_to_s3 = BashOperator(
+        task_id="upload_weather_to_s3",
+        bash_command=(
+            "aws s3 cp /opt/airflow/data_gen/output/weather_data.json "
+            "s3://retail-data-pipeline-bronze/weather/"
+            "weather_data_{{ ds_nodash }}.json"
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Task 5: Verify Uploads
+    # ----------------------------------------------------------
+    verify_s3_uploads = BashOperator(
+        task_id="verify_s3_uploads",
+        bash_command=(
+            'echo "✅ Verifying S3 uploads..." && '
+            "aws s3 ls s3://retail-data-pipeline-bronze/transactions/ --summarize && "
+            "aws s3 ls s3://retail-data-pipeline-bronze/weather/ --summarize && "
+            'echo "✅ All uploads verified!"'
+        ),
+    )
+
+    # ----------------------------------------------------------
+    # Task Dependencies (DAG Flow)
+    # ----------------------------------------------------------
+    # generate_transactions ──┐
+    #                         ├──> upload_transactions ──┐
+    # fetch_weather ──────────┤                          ├──> verify
+    #                         └──> upload_weather ───────┘
+    
+    generate_transactions >> upload_transactions_to_s3
+    fetch_weather >> upload_weather_to_s3
+    [upload_transactions_to_s3, upload_weather_to_s3] >> verify_s3_uploads

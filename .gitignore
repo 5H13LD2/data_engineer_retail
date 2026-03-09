@@ -1,0 +1,29 @@
+# ---- Secrets (NEVER commit these) ----
+.env
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ---- Airflow ----
+logs/
+*.db
+
+# ---- Data Files (too large for git) ----
+data_gen/output/
+*.csv
+*.parquet
+*.json
+
+# ---- OS / Editor ----
+.DS_Store
+*.swp
+.idea/
+.vscode/

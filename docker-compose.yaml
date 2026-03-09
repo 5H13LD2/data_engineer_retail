@@ -1,0 +1,149 @@
+version: '3.8'
+
+# ============================================================
+# 🛠️  Optimized for t3.micro / 1GB RAM + Swap Space
+# Memory limits enforced per container to prevent OOM kill.
+# data-gen service is intentionally DISABLED (run manually).
+# ============================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow # ✅ Use custom image with faker, dbt-snowflake, numpy, etc. baked in
+  environment: &airflow-common-env
+    HOME: /home/airflow
+    USER: airflow
+
+    # ---- Executor ----
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow # ✅ Correct section for Airflow 2.7.1
+
+    # ---- Security ----
+    AIRFLOW__CORE__FERNET_KEY: ''
+
+    # ---- Load reduction (critical for 1GB RAM) ----
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__LOGGING__LOGGING_LEVEL: WARNING # ✅ Correct section for Airflow 2.7.1
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '60' # ✅ Scan DAGs every 60s (not 30s)
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: '120' # ✅ Re-list DAG folder every 2 min
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: '1' # ✅ Only 1 DAG parser process
+    AIRFLOW__WEBSERVER__WORKERS: '1' # ✅ Only 1 gunicorn worker
+    AIRFLOW__WEBSERVER__WORKER_REFRESH_BATCH_SIZE: '1' # ✅ Minimal worker recycling
+
+    # ---- AWS Credentials (loaded from .env file) ----
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-southeast-1}
+    S3_BRONZE_BUCKET: ${S3_BRONZE_BUCKET:-retail-logistics-data-lake}
+
+    # ---- Snowflake Credentials (loaded from .env file) ----
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+    SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE:-COMPUTE_WH}
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-RETAIL}
+    SNOWFLAKE_SCHEMA: ${SNOWFLAKE_SCHEMA:-GOLD}
+    OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+    # ---- Dependencies baked into Dockerfile.airflow (faker, dbt-snowflake, boto3, pandas, numpy) ----
+
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./data_gen:/opt/airflow/data_gen
+    # ✅ Removed dbt_project volume — not needed for ingestion; saves mount overhead
+
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ----------------------------------------------------------
+  # PostgreSQL — Airflow metadata DB
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    # ✅ Memory cap: Postgres only needs ~100-150MB for metadata
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # Airflow Init — Run once to set up DB + admin user
+  # ----------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db upgrade
+        airflow users create --username airflow --password airflow \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 512M # ✅ Init only needs RAM briefly for DB setup
+
+  # ----------------------------------------------------------
+  # Airflow Webserver — UI on port 8080
+  # ----------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    restart: unless-stopped # ✅ Auto-recover on crash
+    ports:
+      - "0.0.0.0:8080:8080"
+    healthcheck:
+      test: [ "CMD-SHELL", "[ -f /opt/airflow/airflow-webserver.pid ]" ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 500M
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------
+  # Airflow Scheduler — DAG parsing + task execution
+  # ----------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped # ✅ Auto-recover: exit 137 (OOM) will restart the scheduler
+    deploy:
+      resources:
+        limits:
+          memory: 600M # ✅ Raised from 350M — scheduler needs headroom to spawn task subprocesses
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+  # ----------------------------------------------------------
+  # data-gen — DISABLED (run manually to avoid OOM)
+  # To run: docker-compose run --rm data-gen
+  # ----------------------------------------------------------
+  # data-gen:
+  #   build:
+  #     context: ./data_gen
+  #   volumes:
+  #     - ./data_gen:/app
+  #   environment:
+  #     NUM_ROWS: "100000"
+  #     DATA_OUTPUT_DIR: /app/output

@@ -1,0 +1,21 @@
+-- ===========================================
+-- Snowflake Setup para sa Retail Data Pipeline
+-- I-run ito sa Snowflake Worksheet
+-- ===========================================
+
+-- Gawa tayo ng Role at Warehouse
+CREATE ROLE DATA_ENG_ROLE;
+CREATE WAREHOUSE RETAIL_WH WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60;
+
+-- Gawa tayo ng Database at Schemas (Medallion Architecture)
+CREATE DATABASE RETAIL_DB;
+CREATE SCHEMA RETAIL_DB.BRONZE; -- Raw data galing S3
+CREATE SCHEMA RETAIL_DB.SILVER; -- Cleaned data
+CREATE SCHEMA RETAIL_DB.GOLD;   -- Analytics ready
+
+-- Grant privileges
+GRANT ALL PRIVILEGES ON DATABASE RETAIL_DB TO ROLE DATA_ENG_ROLE;
+GRANT ALL PRIVILEGES ON SCHEMA RETAIL_DB.BRONZE TO ROLE DATA_ENG_ROLE;
+GRANT ALL PRIVILEGES ON SCHEMA RETAIL_DB.SILVER TO ROLE DATA_ENG_ROLE;
+GRANT ALL PRIVILEGES ON SCHEMA RETAIL_DB.GOLD TO ROLE DATA_ENG_ROLE;
+GRANT USAGE ON WAREHOUSE RETAIL_WH TO ROLE DATA_ENG_ROLE;

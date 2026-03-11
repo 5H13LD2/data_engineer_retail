@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: retail_gold
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'RETAIL_DB') }}"
+    schema: "GOLD"
+    tables:
+      - name: DAILY_REVENUE
+      - name: TOP_PRODUCTS
+      - name: STORE_REVENUE
